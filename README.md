@@ -1,6 +1,6 @@
 <div align="center">
     <h1>
-    Spark-TTS-API (Fork from SparkAudio/Spark-TTS)
+    SparkTTS-API (Fork from SparkAudio/Spark-TTS)
     </h1>
     <p>
     Official PyTorch code for inference of <br>

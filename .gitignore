@@ -173,5 +173,11 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-.wav
-.mp3
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.wma
+*.webm

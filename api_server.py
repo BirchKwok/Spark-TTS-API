@@ -1,4 +1,3 @@
-
 import os
 import torch
 import soundfile as sf
@@ -6,6 +5,7 @@ import logging
 import argparse
 import platform
 import uvicorn
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
@@ -28,7 +28,8 @@ def initialize_model(model_dir="pretrained_models/Spark-TTS-0.5B", device_id=0):
     # # Determine appropriate device based on platform and availability
     if platform.system() == "Darwin":
         # macOS with MPS support (Apple Silicon)
-        device = torch.device(f"mps:{device_id}")
+        device = torch.device("cpu")
+        # device = torch.device(f"mps:{device_id}")
         logging.info(f"Using MPS device: {device}")
     elif torch.cuda.is_available():
         # System with CUDA support
@@ -130,11 +131,20 @@ def parse_arguments():
     return parser.parse_args()
 
 
+# Original app definition needs to happen early for decorators
 app = FastAPI()
 
 # Global variable to hold the model and output directory
 model_tts: Optional[SparkTTS] = None
 output_audio_dir: str = "example/results_api"
+app_config = {
+    "model_dir": "pretrained_models/Spark-TTS-0.5B",
+    "device_id": 0,
+    "output_dir": "example/results_api"
+}
+
+# Global dictionary for idempotency tracking (Not production-ready)
+idempotency_cache = {}
 
 class TTSCreateRequest(BaseModel):
     text: str
@@ -142,28 +152,52 @@ class TTSCreateRequest(BaseModel):
     pitch: int   # 1-5
     speed: int   # 1-5
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
     """Load the model and set up configurations when the server starts."""
     global model_tts, output_audio_dir
-    args = parse_arguments()
-    model_tts = initialize_model(model_dir=args.model_dir, device_id=args.device)
-    output_audio_dir = args.output_dir
+    # Use configuration from app_config dictionary
+    logging.info(f"Lifespan startup: Loading model from {app_config['model_dir']}")
+    model_tts = initialize_model(model_dir=app_config['model_dir'], device_id=app_config['device_id'])
+    output_audio_dir = app_config['output_dir']
     # Ensure output directory exists
     os.makedirs(output_audio_dir, exist_ok=True)
-    logging.info(f"API server started. Model loaded. Output directory: {output_audio_dir}")
+    logging.info(f"Lifespan startup complete. Model loaded. Output directory: {output_audio_dir}")
+    yield  # Application runs here
+    # Clean up resources if needed on shutdown (optional)
+    logging.info("Lifespan shutdown.")
+    model_tts = None # Release model resources if applicable
+
+# Now assign the lifespan to the app instance
+app.router.lifespan_context = lifespan
 
 @app.post("/tts/create", response_class=FileResponse)
 async def api_create_voice(
     text: str = Form(...),
     gender: str = Form(...),
     pitch: int = Form(...),
-    speed: int = Form(...)
+    speed: int = Form(...),
+    idempotency_key: Optional[str] = Form(None)  # Add idempotency key
 ):
     """
     Create a synthetic voice with adjustable parameters.
+    Supports idempotency via idempotency_key.
     Returns the generated WAV audio file.
     """
+    global idempotency_cache # Ensure we can modify the global cache
+
+    # Check idempotency cache first
+    if idempotency_key and idempotency_key in idempotency_cache:
+        cached_result_path = idempotency_cache[idempotency_key]
+        if os.path.exists(cached_result_path):
+            logging.info(f"Returning cached result for idempotency key: {idempotency_key}")
+            return FileResponse(path=cached_result_path, media_type='audio/wav', filename=os.path.basename(cached_result_path))
+        else:
+            # Cached file might have been deleted, remove from cache and proceed
+            logging.warning(f"Cached file not found for key {idempotency_key}. Re-processing.")
+            del idempotency_cache[idempotency_key]
+
+
     if not model_tts:
         raise HTTPException(status_code=503, detail="Model not loaded yet. Please try again shortly.")
     if gender not in ["male", "female"]:
@@ -185,6 +219,12 @@ async def api_create_voice(
             speed=speed_val,
             save_dir=output_audio_dir
         )
+
+        # Store result in idempotency cache if key was provided
+        if idempotency_key:
+            idempotency_cache[idempotency_key] = audio_output_path
+            logging.info(f"Stored result for idempotency key: {idempotency_key}")
+
         return FileResponse(path=audio_output_path, media_type='audio/wav', filename=os.path.basename(audio_output_path))
     except RuntimeError as e:
         logging.error(f"TTS creation failed: {e}")
@@ -198,14 +238,57 @@ async def api_create_voice(
 async def api_clone_voice(
     text: str = Form(...),
     prompt_audio: UploadFile = File(...),
-    prompt_text: Optional[str] = Form(None)
+    prompt_text: Optional[str] = Form(None),      # Text of the prompt audio (optional)
+    idempotency_key: Optional[str] = Form(None),
+    # Optional parameters for customization
+    gender: Optional[str] = Form(None),      # 'male' or 'female'
+    pitch: Optional[int] = Form(None),       # 1-5
+    speed: Optional[int] = Form(None)        # 1-5
 ):
     """
-    Clone voice using text and a prompt audio file.
-    Returns the generated WAV audio file.
+    Clone voice using text and a prompt audio file. Optionally customize the output voice.
+
+    Args:
+        text (str): The text to synthesize.
+        prompt_audio (UploadFile): The reference audio file for voice cloning.
+        prompt_text (Optional[str], optional): Text content of the prompt audio. Recommended for better cloning quality, especially if the prompt audio language matches the target text language. Defaults to None.
+        idempotency_key (Optional[str], optional): A unique key to ensure idempotency. If provided and a request with the same key was successfully processed before, returns the cached result. Defaults to None.
+        gender (Optional[str], optional): Customize the output voice gender ('male' or 'female'). Overrides the gender inferred from the prompt if provided. Defaults to None.
+        pitch (Optional[int], optional): Customize the output voice pitch (1=lowest, 5=highest). Overrides the pitch inferred from the prompt if provided. Defaults to None.
+        speed (Optional[int], optional): Customize the output voice speed (1=slowest, 5=fastest). Overrides the speed inferred from the prompt if provided. Defaults to None.
+
+    Returns:
+        FileResponse: The generated WAV audio file.
+
+    Raises:
+        HTTPException: 400 if validation fails for gender, pitch, or speed.
+        HTTPException: 500 if TTS generation fails.
+        HTTPException: 503 if the model is not loaded.
     """
+    global idempotency_cache # Ensure we can modify the global cache
+
+    # Check idempotency cache first
+    if idempotency_key and idempotency_key in idempotency_cache:
+        cached_result_path = idempotency_cache[idempotency_key]
+        if os.path.exists(cached_result_path):
+            logging.info(f"Returning cached result for idempotency key: {idempotency_key}")
+            # Note: We don't need the uploaded prompt_audio if returning cached result
+            return FileResponse(path=cached_result_path, media_type='audio/wav', filename=os.path.basename(cached_result_path))
+        else:
+            # Cached file might have been deleted, remove from cache and proceed
+            logging.warning(f"Cached file not found for key {idempotency_key}. Re-processing.")
+            del idempotency_cache[idempotency_key]
+
     if not model_tts:
         raise HTTPException(status_code=503, detail="Model not loaded yet. Please try again shortly.")
+
+    # Validate optional parameters if provided
+    if gender is not None and gender not in ["male", "female"]:
+        raise HTTPException(status_code=400, detail="Invalid gender. Choose 'male' or 'female'.")
+    if pitch is not None and not (1 <= pitch <= 5):
+        raise HTTPException(status_code=400, detail="Invalid pitch. Choose an integer between 1 and 5.")
+    if speed is not None and not (1 <= speed <= 5):
+        raise HTTPException(status_code=400, detail="Invalid speed. Choose an integer between 1 and 5.")
 
     # Save the uploaded prompt audio to a temporary file
     temp_prompt_path = os.path.join(output_audio_dir, f"prompt_{datetime.now().strftime('%Y%m%d%H%M%S_%f')}_{prompt_audio.filename}")
@@ -214,13 +297,27 @@ async def api_clone_voice(
             buffer.write(await prompt_audio.read())
         logging.info(f"Prompt audio saved to {temp_prompt_path}")
 
+        # Map pitch/speed integers to model's expected string values if provided
+        pitch_val = LEVELS_MAP_UI[pitch] if pitch is not None else None
+        speed_val = LEVELS_MAP_UI[speed] if speed is not None else None
+
         audio_output_path = run_tts(
             text=text,
             model=model_tts,
             prompt_text=prompt_text,
             prompt_speech_path=temp_prompt_path,
+            # Pass customization parameters
+            gender=gender,
+            pitch=pitch_val,
+            speed=speed_val,
             save_dir=output_audio_dir
         )
+
+        # Store result in idempotency cache if key was provided
+        if idempotency_key:
+            idempotency_cache[idempotency_key] = audio_output_path
+            logging.info(f"Stored result for idempotency key: {idempotency_key}")
+
         return FileResponse(path=audio_output_path, media_type='audio/wav', filename=os.path.basename(audio_output_path))
     except RuntimeError as e:
         logging.error(f"TTS cloning failed: {e}")
@@ -238,7 +335,12 @@ async def api_clone_voice(
 if __name__ == "__main__":
     args = parse_arguments()
 
-    # Note: The model is loaded via the startup_event when uvicorn starts the app.
+    # Update the global config dictionary with parsed arguments BEFORE running uvicorn
+    app_config["model_dir"] = args.model_dir
+    app_config["device_id"] = args.device
+    app_config["output_dir"] = args.output_dir
+
+    # Note: The model is loaded via the lifespan manager when uvicorn starts the app.
     # This avoids loading the model twice if __name__ == "__main__" is run directly by some tools.
 
     uvicorn.run(app, host=args.host, port=args.port) 
