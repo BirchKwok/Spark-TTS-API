@@ -142,6 +142,132 @@ For additional CLI and Web UI methods, including alternative implementations and
 
 - [CLI and UI by AcTePuKc](https://github.com/SparkAudio/Spark-TTS/issues/10)
 
+**HTTP API Usage**
+
+You can interact with the SparkTTS API by sending HTTP requests. First, you need to start the API server:
+
+```bash
+python api_server.py --model_dir pretrained_models/Spark-TTS-0.5B --device 0 --host 0.0.0.0 --port 8000
+```
+
+The API provides two main endpoints:
+
+1.  **`/tts/create` (POST)**: Creates synthetic speech based on the provided text and parameters (gender, pitch, speed).
+2.  **`/tts/clone` (POST)**: Synthesizes the specified text using a voice cloned from the provided prompt audio.
+
+Below are examples using the Python `requests` library to call these endpoints:
+
+**Example 1: Create Voice (`/tts/create`)**
+
+```python
+import requests
+
+url = "http://localhost:8000/tts/create"
+
+payload = {
+    'text': 'Hello, world! This is a text-to-speech test.',
+    'gender': 'female',  # Valid values: 'female', 'male'
+    'pitch': 'moderate', # Valid values: 'very_low', 'low', 'moderate', 'high', 'very_high'
+    'speed': 'moderate'  # Valid values: 'very_low', 'low', 'moderate', 'high', 'very_high'
+}
+
+try:
+    response = requests.post(url, data=payload)
+    response.raise_for_status() # Check if the request was successful
+
+    # Save the response content as a WAV file
+    with open('created_audio.wav', 'wb') as f:
+        f.write(response.content)
+    print("Voice creation successful, audio saved as created_audio.wav")
+
+except requests.exceptions.RequestException as e:
+    print(f"Request failed: {e}")
+    # Try to print more detailed error information from the server
+    try:
+        print(f"Server returned error: {response.text}")
+    except NameError: # If response failed before raise_for_status()
+        pass
+except Exception as e:
+    print(f"An error occurred while processing the response: {e}")
+
+```
+
+**Example 2: Clone Voice (`/tts/clone`)**
+
+```python
+import requests
+
+url = "http://localhost:8000/tts/clone"
+
+# Ensure you have a prompt audio file named 'prompt.wav' in the current directory
+prompt_audio_path = 'prompt.wav'
+# Text transcription of the prompt audio (optional, but recommended for better results)
+prompt_text = 'This is the text content of the prompt audio.'
+
+payload = {
+    'text': 'This is text synthesized based on the cloned voice.',
+    'prompt_text': prompt_text # Optional
+    # Optional gender, pitch, speed parameters can also be added for fine-tuning
+    # 'gender': 'male',
+    # 'pitch': 'high',
+    # 'speed': 'low'
+}
+
+files = {
+    'prompt_audio': (prompt_audio_path, open(prompt_audio_path, 'rb'), 'audio/wav')
+}
+
+try:
+    response = requests.post(url, data=payload, files=files)
+    response.raise_for_status() # Check if the request was successful
+
+    # Save the response content as a WAV file
+    with open('cloned_audio.wav', 'wb') as f:
+        f.write(response.content)
+    print("Voice cloning successful, audio saved as cloned_audio.wav")
+
+except FileNotFoundError:
+    print(f"Error: Prompt audio file '{prompt_audio_path}' not found.")
+except requests.exceptions.RequestException as e:
+    print(f"Request failed: {e}")
+    # Try to print more detailed error information from the server
+    try:
+        print(f"Server returned error: {response.text}")
+    except NameError:
+        pass
+except Exception as e:
+    print(f"An error occurred while processing the response: {e}")
+finally:
+    # Close the file handle
+    if 'prompt_audio' in files and files['prompt_audio'][1]:
+        files['prompt_audio'][1].close()
+```
+
+**Return Values**
+
+*   **Success**: HTTP status code `200 OK`. The response body is the binary content of the generated WAV audio file (`Content-Type: audio/wav`).
+*   **Failure**:
+    *   HTTP status code `422 Unprocessable Entity`: Invalid request parameters (e.g., missing required parameters, or parameter values outside the allowed range). The response body will contain a JSON object describing the error.
+    *   HTTP status code `500 Internal Server Error`: The server encountered an error during request processing or model inference. The response body may contain error details.
+
+For example, a `422` error response body might look like this:
+
+```json
+{
+  "detail": [
+    {
+      "loc": [
+        "body",
+        "pitch"
+      ],
+      "msg": "value is not a valid integer",
+      "type": "type_error.integer"
+    }
+  ]
+}
+```
+
+Please note that you need to start `api_server.py` before running these examples, and for the voice cloning example, you need to prepare a prompt audio file named `prompt.wav`.
 
 ## Runtime
 
