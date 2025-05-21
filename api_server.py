@@ -171,6 +171,13 @@ async def lifespan(app_instance: FastAPI):
 # Now assign the lifespan to the app instance
 app.router.lifespan_context = lifespan
 
+@app.get("/hello")
+async def hello():
+    """
+    Returns a greeting message from the API.
+    """
+    return {"message": "Hello! I am the SparkTTS API service. Nice to meet you!"}
+
 @app.post("/tts/create", response_class=FileResponse)
 async def api_create_voice(
     text: str = Form(...),
