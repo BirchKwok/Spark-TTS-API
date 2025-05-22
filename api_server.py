@@ -136,11 +136,14 @@ app = FastAPI()
 
 # Global variable to hold the model and output directory
 model_tts: Optional[SparkTTS] = None
-output_audio_dir: str = "example/results_api"
+root_dir: str = os.path.dirname(os.path.abspath(__file__))
+model_dir: str = os.path.join(root_dir, "pretrained_models/Spark-TTS-0.5B")
+output_audio_dir: str = os.path.join(root_dir, "example/results_api")
+
 app_config = {
-    "model_dir": "pretrained_models/Spark-TTS-0.5B",
+    "model_dir": model_dir,
     "device_id": 0,
-    "output_dir": "example/results_api"
+    "output_dir": output_audio_dir
 }
 
 # Global dictionary for idempotency tracking (Not production-ready)
