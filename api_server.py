@@ -12,17 +12,28 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+from pathlib import Path
 
 from cli.SparkTTS import SparkTTS
 from sparktts.utils.token_parser import LEVELS_MAP_UI
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+root_dir = Path(__file__).resolve().parent # Use script's directory as root
+model_dir = root_dir / "pretrained_models/Spark-TTS-0.5B"
+output_audio_dir = root_dir / "example/results_api"
 
-def initialize_model(model_dir="pretrained_models/Spark-TTS-0.5B", device_id=0):
+app_config = {
+    "model_dir": model_dir.absolute(),
+    "device_id": 0,
+    "output_dir": output_audio_dir.absolute()
+}
+
+def initialize_model(model_dir=model_dir, device_id=0):
     """Load the model once at the beginning."""
+    model_dir = Path(model_dir).absolute()
+
     logging.info(f"Loading model from: {model_dir}")
 
     # # Determine appropriate device based on platform and availability
@@ -41,6 +52,7 @@ def initialize_model(model_dir="pretrained_models/Spark-TTS-0.5B", device_id=0):
         logging.info("GPU acceleration not available, using CPU")
 
     try:
+        print(f"Loading model from {model_dir} on device {device}")
         model = SparkTTS(model_dir, device)
         logging.info("Model loaded successfully.")
         return model
@@ -136,15 +148,7 @@ app = FastAPI()
 
 # Global variable to hold the model and output directory
 model_tts: Optional[SparkTTS] = None
-root_dir: str = os.path.dirname(os.path.abspath(__file__))
-model_dir: str = os.path.join(root_dir, "pretrained_models/Spark-TTS-0.5B")
-output_audio_dir: str = os.path.join(root_dir, "example/results_api")
 
-app_config = {
-    "model_dir": model_dir,
-    "device_id": 0,
-    "output_dir": output_audio_dir
-}
 
 # Global dictionary for idempotency tracking (Not production-ready)
 idempotency_cache = {}
@@ -346,9 +350,25 @@ if __name__ == "__main__":
     args = parse_arguments()
 
     # Update the global config dictionary with parsed arguments BEFORE running uvicorn
-    app_config["model_dir"] = args.model_dir
+    # Ensure paths from arguments are resolved correctly relative to root_dir
+
+    # Resolve model_dir from arguments
+    parsed_model_dir_arg = Path(args.model_dir)
+    if parsed_model_dir_arg.is_absolute():
+        app_config["model_dir"] = parsed_model_dir_arg.resolve()
+    else:
+        # If args.model_dir is relative, assume it's relative to the project root_dir
+        app_config["model_dir"] = (root_dir / parsed_model_dir_arg).resolve()
+
+    # Resolve output_dir from arguments
+    parsed_output_dir_arg = Path(args.output_dir)
+    if parsed_output_dir_arg.is_absolute():
+        app_config["output_dir"] = parsed_output_dir_arg.resolve()
+    else:
+        # If args.output_dir is relative, assume it's relative to the project root_dir
+        app_config["output_dir"] = (root_dir / parsed_output_dir_arg).resolve()
+
     app_config["device_id"] = args.device
-    app_config["output_dir"] = args.output_dir
 
     # Note: The model is loaded via the lifespan manager when uvicorn starts the app.
     # This avoids loading the model twice if __name__ == "__main__" is run directly by some tools.
